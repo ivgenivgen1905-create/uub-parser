@@ -1,96 +1,97 @@
+import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
+import warnings
 
-# Базовий URL з твоїм фільтром
-BASE_URL = "https://uub.in.ua/collection/zemlya"
-PARAMS = {
-    "Auctions[region]": "Харківська обл.",
-    "Auctions[lot_price_from]": "",
-    "Auctions[lot_price_to]": "",
-    "Auctions[from_date]": "",
-    "Auctions[to_date]": "",
-    "Auctions[state]": "",
-    "Auctions[lot_number]": "",
-    "Auctions[encumbrance_of_property]": ""
-}
+warnings.filterwarnings("ignore", category=requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
-def parse_uub_page(url, params):
-    try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()  # Помилка якщо не 200
-    except requests.exceptions.HTTPError as e:
-        print(f"Помилка запиту: {e} (можливо, сайт недоступний, статус {response.status_code})")
-        return []
+st.title("Парсер лотів з uub.in.ua")
 
-    soup = BeautifulSoup(response.text, 'html.parser')
-    
-    lots = []
-    # Знаходимо картки лотів (на основі структури сайту: div з class 'lot-item' або подібне — адаптуй якщо зміниться)
-    lot_items = soup.find_all('div', class_='lot-item')  # Змініть class на актуальний (перевірте HTML)
-    
-    for item in lot_items:
-        lot = {}
-        
-        # Лот номер
-        lot['lot_number'] = item.find('span', class_='lot-number').text.strip() if item.find('span', class_='lot-number') else 'N/A'
-        
-        # Опис/назва
-        lot['description'] = item.find('h3', class_='lot-title').text.strip() if item.find('h3', class_='lot-title') else 'N/A'
-        
-        # Стартова ціна
-        lot['start_price'] = item.find('span', class_='start-price').text.strip() if item.find('span', class_='start-price') else 'N/A'
-        
-        # Дата аукціону
-        lot['auction_date'] = item.find('span', class_='auction-date').text.strip() if item.find('span', class_='auction-date') else 'N/A'
-        
-        # Статус
-        lot['status'] = item.find('span', class_='status').text.strip() if item.find('span', class_='status') else 'N/A'
-        
-        # Регіон (вже фільтр, але витягуємо якщо є)
-        lot['region'] = item.find('span', class_='region').text.strip() if item.find('span', class_='region') else 'Харківська обл.'
-        
-        # Площа (area), кадастровий номер тощо — шукаємо в деталях
-        details = item.find('div', class_='lot-details')
-        if details:
-            lot['area'] = details.find('span', class_='area').text.strip() if details.find('span', class_='area') else 'N/A'
-            lot['cadastral'] = details.find('span', class_='cadastral').text.strip() if details.find('span', class_='cadastral') else 'N/A'
-            lot['encumbrance'] = details.find('span', class_='encumbrance').text.strip() if details.find('span', class_='encumbrance') else 'N/A'
-        
-        # Посилання на лот
-        lot['link'] = 'https://uub.in.ua' + item.find('a', class_='lot-link')['href'] if item.find('a', class_='lot-link') else 'N/A'
-        
-        lots.append(lot)
-    
-    return lots
+st.info("Встав посилання на сторінку з лотами (наприклад, https://uub.in.ua/collection/zemlya?... з твоїми фільтрами). Якщо сайт видає 503 або SSL-помилку — почекай, це тимчасово.")
 
-# Функція для пагінації (якщо потрібно всі сторінки)
-def parse_all_pages(base_url, params, max_pages=5):  # Обмежуємо, щоб не забанили
-    all_lots = []
-    page = 1
-    while page <= max_pages:
-        params['page'] = page
-        lots = parse_uub_page(base_url, params)
-        if not lots:
-            break
-        all_lots.extend(lots)
-        page += 1
-        # Перевірка на наступну сторінку (адаптувати за HTML)
-        # Якщо немає більше — break
-    return all_lots
+url_input = st.text_input(
+    "Встав посилання на сторінку аукціонів",
+    value="https://uub.in.ua/collection/zemlya?Auctions%5Bregion%5D=%D0%A5%D0%B0%D1%80%D0%BA%D1%96%D0%B2%D1%81%D1%8C%D0%BA%D0%B0+%D0%BE%D0%B1%D0%BB.&Auctions%5Blot_price_from%5D=&Auctions%5Blot_price_to%5D=&Auctions%5Bfrom_date%5D=&Auctions%5Bto_date%5D=&Auctions%5Bstate%5D=&Auctions%5Blot_number%5D=&Auctions%5Bencumbrance_of_property%5D=",
+    help="Можеш змінити фільтри в URL і вставити нове посилання"
+)
 
-# Запуск
-lots_data = parse_all_pages(BASE_URL, PARAMS)
+max_pages = st.number_input("Максимальна кількість сторінок для парсингу", min_value=1, max_value=20, value=3)
 
-if lots_data:
-    # Дублюємо дані: спочатку як список
-    print("Сирі дані (дубльовані як список диктів):")
-    for lot in lots_data:
-        print(lot)
-    
-    # Потім як таблиця (pandas)
-    df = pd.DataFrame(lots_data)
-    print("\nТаблиця з даними:")
-    print(df.to_string(index=False))  # Або df.to_csv('uub_lots.csv') для файлу
-else:
-    print("Немає даних — перевір сайт або параметри.")
+if st.button("Парсити сторінку(і)"):
+    if not url_input:
+        st.error("Встав посилання!")
+    else:
+        with st.spinner("Парсимо... (може зайняти 10–60 секунд залежно від кількості сторінок)"):
+            all_lots = []
+
+            current_url = url_input
+            for page in range(1, max_pages + 1):
+                try:
+                    st.write(f"Обробляємо сторінку {page}...")
+                    response = requests.get(current_url, timeout=15, verify=False)
+                    response.raise_for_status()
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Помилка доступу до сайту на сторінці {page}: {str(e)}")
+                    st.info("Ймовірно, сайт тимчасово недоступний (503 або SSL-проблема). Спробуй пізніше або перевір у браузері.")
+                    break
+
+                soup = BeautifulSoup(response.text, 'html.parser')
+
+                # Адаптуй ці селектори під реальну структуру сайту!
+                # Відкрий сторінку в браузері → F12 → подивись класи/теги лотів
+                lot_items = soup.find_all('div', class_='lot-item')  # ← ЗМІНИ НА АКТУАЛЬНИЙ КЛАС!
+
+                if not lot_items:
+                    st.warning(f"На сторінці {page} не знайдено лотів. Можливо, кінець списку або неправильні селектори.")
+                    break
+
+                for item in lot_items:
+                    lot = {}
+
+                    # Приклади — заміни на реальні класи/теги
+                    lot['lot_number'] = item.find('span', class_='lot-number') or item.find('div', class_='lot-num') or 'N/A'
+                    if lot['lot_number'] != 'N/A':
+                        lot['lot_number'] = lot['lot_number'].get_text(strip=True)
+
+                    lot['description'] = item.find('h3') or item.find('a', class_='lot-title') or 'N/A'
+                    if lot['description'] != 'N/A':
+                        lot['description'] = lot['description'].get_text(strip=True)
+
+                    lot['start_price'] = item.find(string=lambda t: 'грн' in t) or 'N/A'  # простий пошук по тексту
+                    lot['auction_date'] = item.find(string=lambda t: 'Дата' in t or '.' in t and len(t.split('.'))==3) or 'N/A'
+
+                    # Додай інші поля: площа, кадастр, обтяження тощо
+                    # Приклад:
+                    # lot['area'] = item.find('span', class_='area-m2').get_text(strip=True) if ... else 'N/A'
+
+                    lot['link'] = item.find('a')['href'] if item.find('a') else 'N/A'
+                    if lot['link'] != 'N/A' and not lot['link'].startswith('http'):
+                        lot['link'] = 'https://uub.in.ua' + lot['link']
+
+                    all_lots.append(lot)
+
+                # Пагінація: знайди посилання на наступну сторінку
+                next_link = soup.find('a', text='Наступна') or soup.find('a', {'rel': 'next'})
+                if next_link and 'href' in next_link.attrs:
+                    current_url = 'https://uub.in.ua' + next_link['href']
+                else:
+                    st.info("Досягнуто кінець сторінок або пагінація не знайдена.")
+                    break
+
+            if all_lots:
+                df = pd.DataFrame(all_lots)
+                st.success(f"Знайдено {len(all_lots)} лотів!")
+
+                st.dataframe(df)  # показуємо таблицю в апці
+
+                # Скачування
+                csv = df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button(
+                    label="Скачати таблицю як CSV",
+                    data=csv,
+                    file_name="uub_lots.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.warning("Не вдалося знайти жодного лоту. Перевір селектори в коді або посилання.")
