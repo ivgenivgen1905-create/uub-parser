@@ -4,182 +4,169 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import warnings
 import time
+import re
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 warnings.filterwarnings("ignore", category=requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
-st.set_page_config(page_title="Парсер uub.in.ua", layout="wide")
+st.set_page_config(page_title="Парсер uub.in.ua — усі кандидати", layout="wide")
 
-st.title("Парсер лотів з uub.in.ua (Земля)")
+st.title("Парсер лотів з uub.in.ua — максимальне захоплення кандидатів")
 
 st.markdown("""
-Встав посилання на будь-яку сторінку з лотами (з фільтрами чи без).  
-Парсер автоматично додасть/змінить параметр `page=N` для всіх наступних сторінок.  
-Поки сайт видає 503 — нічого не працюватиме. Перевір статус: https://downforeveryoneorjustme.com/uub.in.ua
+Парсер намагається витягнути **всі можливі картки лотів** на сторінці,  
+навіть якщо вони не містять усіх ключових слів.  
+Це може включати трохи сміття, але ви отримаєте значно більше даних.
 """)
 
-# Поля вводу
-col1, col2 = st.columns([3, 1])
+col1, col2, col3 = st.columns([4, 1, 1])
 
 with col1:
     url_input = st.text_input(
         "Посилання на сторінку з лотами",
         value="https://uub.in.ua/collection/zemlya",
-        help="Наприклад: https://uub.in.ua/collection/zemlya?page=1 або з будь-якими фільтрами"
+        help="Може бути з фільтрами або без"
     )
 
 with col2:
-    max_pages = st.number_input(
-        "Максимальна кількість сторінок",
-        min_value=1,
-        max_value=200,
-        value=5,
-        step=1,
-        help="Не став більше 50–100 одразу — можуть заблокувати IP за швидкі запити"
-    )
+    max_pages = st.number_input("Макс. сторінок", min_value=1, max_value=200, value=10, step=1)
 
-delay_seconds = st.slider(
-    "Пауза між запитами (сек)",
-    min_value=1.0,
-    max_value=10.0,
-    value=2.5,
-    step=0.5,
-    help="Більша пауза — менший ризик бану"
-)
+with col3:
+    delay_sec = st.slider("Пауза між запитами (сек)", 1.0, 8.0, 3.0, 0.5)
 
-if st.button("Почати парсинг", type="primary"):
+if st.button("Парсити всіх кандидатів", type="primary"):
     if not url_input.strip():
         st.error("Вкажіть посилання!")
         st.stop()
 
-    with st.spinner(f"Парсинг {max_pages} сторінок..."):
+    with st.spinner(f"Парсинг до {max_pages} сторінок..."):
         all_lots = []
-        current_base_url = url_input.strip()
+        seen_links = set()  # уникнення дублів за посиланням
 
-        # Очищаємо існуючий параметр page
-        parsed = urlparse(current_base_url)
-        query_params = parse_qs(parsed.query)
-        query_params.pop('page', None)  # видаляємо page якщо був
-        cleaned_query = urlencode(query_params, doseq=True)
-
-        base_url_no_page = urlunparse((
-            parsed.scheme,
-            parsed.netloc,
-            parsed.path,
-            parsed.params,
-            cleaned_query,
-            parsed.fragment
-        ))
-
-        if base_url_no_page.endswith('?'):
-            base_url_no_page = base_url_no_page[:-1]
+        # Очищення базового URL від page
+        parsed = urlparse(url_input.strip())
+        q = parse_qs(parsed.query)
+        q.pop('page', None)
+        base_query = urlencode(q, doseq=True)
+        base_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, base_query, parsed.fragment))
+        if base_url.endswith('?'):
+            base_url = base_url[:-1]
 
         page = 1
         while page <= max_pages:
-            st.write(f"Обробка сторінки {page} з {max_pages}...")
+            st.write(f"Сторінка {page} з {max_pages}...")
 
-            # Формуємо URL
-            if '?' in base_url_no_page:
-                page_url = f"{base_url_no_page}&page={page}"
-            else:
-                page_url = f"{base_url_no_page}?page={page}"
+            page_url = f"{base_url}&page={page}" if '?' in base_url else f"{base_url}?page={page}"
 
             try:
-                resp = requests.get(
+                r = requests.get(
                     page_url,
                     timeout=30,
                     verify=False,
-                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                    headers={'User-Agent': 'Mozilla/5.0'}
                 )
-                resp.raise_for_status()
-            except requests.exceptions.RequestException as e:
-                st.error(f"Помилка на сторінці {page}: {str(e)}")
-                if "503" in str(e) or "Service Unavailable" in str(e):
-                    st.info("Сайт видає 503 Service Unavailable — зачекай 1–24 години.")
-                elif "SSLError" in str(e):
-                    st.info("Проблема з SSL-сертифікатом сайту. verify=False вже включено.")
+                r.raise_for_status()
+            except Exception as e:
+                st.error(f"Сторінка {page} — помилка: {str(e)}")
                 break
 
-            soup = BeautifulSoup(resp.text, 'html.parser')
+            soup = BeautifulSoup(r.text, 'html.parser')
 
-            # Універсальний пошук можливих карток лотів
-            candidates = soup.find_all(['div', 'article', 'section', 'li'], class_=lambda c: c and any(
-                word in c.lower() for word in ['lot', 'auction', 'card', 'item', 'col-', 'mb-', 'shadow', 'product']
-            ))
+            # Дуже широкий пошук кандидатів — майже всі блоки, які можуть бути картками
+            candidates_tags = ['div', 'article', 'section', 'li', 'figure', 'a']
+            candidates_classes = [
+                'lot', 'auction', 'card', 'item', 'product', 'tile', 'block', 'entry', 'post',
+                'col-', 'mb-', 'shadow', 'grid-item', 'list-item', 'thumbnail', 'media', 'panel'
+            ]
+
+            candidates = []
+            for tag in candidates_tags:
+                for cls in candidates_classes:
+                    candidates.extend(soup.find_all(tag, class_=lambda x: x and cls in x.lower()))
+
+            # Якщо мало — беремо всі div з href всередині або з img
+            if len(candidates) < 10:
+                candidates = soup.find_all(['div', 'li'], recursive=False)
+                candidates = [c for c in candidates if c.find('a') or c.find('img')]
 
             found_on_page = 0
 
             for card in candidates:
-                lot = {}
+                # Витягуємо весь чистий текст
+                text = card.get_text(separator=' ', strip=True).replace('\n', ' ').replace('  ', ' ')
+                if len(text) < 40:
+                    continue  # надто короткий блок — пропускаємо
 
-                # Опис / основний текст
-                desc_candidates = card.find_all(['h1','h2','h3','h4','h5','p','div','span'])
-                desc = ""
-                for tag in desc_candidates:
-                    txt = tag.get_text(strip=True)
-                    if len(txt) > 20 and any(kw in txt.lower() for kw in ['ділянка','га','кадастров','площе','номер']):
-                        desc = txt
-                        break
-                lot['Опис'] = desc or card.get_text(strip=True)[:250] + '...' or 'N/A'
+                lot = {'Повний текст': text[:600] + '...' if len(text) > 600 else text}
 
-                # Ціна
-                price_texts = card.find_all(string=lambda t: t and any(c in t for c in ['UAH','грн','₴','.',',']) and any(d in t for d in '0123456789'))
-                lot['Ціна'] = price_texts[0].strip() if price_texts else 'N/A'
-
-                # Номер лоту
-                lot_num = card.find(string=lambda t: t and ('лот' in t.lower() or t.strip().isdigit() and 5 <= len(t.strip()) <= 8))
-                lot['Номер лоту'] = lot_num.strip() if lot_num else 'N/A'
-
-                # Область
-                oblast = card.find(string=lambda t: t and 'обл.' in t)
-                lot['Область'] = oblast.strip() if oblast else 'N/A'
-
-                # Дата
-                date_str = card.find(string=lambda t: t and ('Дата' in t or '-' in t and len(t.split('-')) >= 2))
-                lot['Дата'] = date_str.strip() if date_str else 'N/A'
-
-                # Посилання
+                # Посилання (найважливіше для унікальності)
                 a = card.find('a', href=True)
-                lot['Посилання'] = ('https://uub.in.ua' + a['href'] if a else 'N/A') if a else 'N/A'
+                link = None
+                if a:
+                    href = a['href']
+                    link = 'https://uub.in.ua' + href if href.startswith('/') else href
+                lot['Посилання'] = link or 'N/A'
+
+                if link in seen_links:
+                    continue  # дубль
+                seen_links.add(link)
 
                 # Фото
                 img = card.find('img', src=True)
                 lot['Фото'] = img['src'] if img else 'N/A'
 
-                if lot['Опис'] != 'N/A' or lot['Ціна'] != 'N/A' or lot['Номер лоту'] != 'N/A':
-                    all_lots.append(lot)
-                    found_on_page += 1
+                # Ціна (будь-яке число з грн/UAH)
+                price_m = re.search(r'(\d{1,3}(?:\s*\d{3})*(?:[.,]\d{1,2})?)\s*(UAH|грн|₴|гривень)', text, re.I)
+                lot['Ціна'] = price_m.group(0) if price_m else 'N/A'
 
-            st.write(f"Знайдено на сторінці {page}: {found_on_page} потенційних лотів")
+                # Номер лоту
+                lot_num_m = re.search(r'(?:лот|№|номер лоту|Лот №?)\s*[:\-]?\s*(\d{5,8})', text, re.I)
+                lot['Номер лоту'] = lot_num_m.group(1) if lot_num_m else 'N/A'
 
-            if found_on_page == 0:
-                st.info(f"Сторінка {page} здається порожньою або кінець списку.")
+                # Область
+                oblast_m = re.search(r'(?:Область|обл\.|регіон)\s*[:\-]?\s*([^,\.\n]+?)(?:\s+обл|\s*$)', text, re.I)
+                lot['Область'] = oblast_m.group(1).strip() if oblast_m else 'N/A'
+
+                # Площа / га
+                area_m = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:га|гектар|га\.)', text, re.I)
+                lot['Площа (га)'] = area_m.group(0) if area_m else 'N/A'
+
+                # Кадастровий номер
+                kadas_m = re.search(r'(?:\d{10,15}(?::\d{1,5}){3,5})|(?:кадастр|КН)\s*[:\-]?\s*(\d{10,15}(?::\d{1,5}){3,5})', text, re.I)
+                lot['Кадастровий номер'] = kadas_m.group(1) if kadas_m else 'N/A'
+
+                # Дата
+                date_m = re.search(r'(?:Дата|початку|аукціону)\s*[:\-]?\s*([\d\.\-]{8,20})', text, re.I)
+                lot['Дата'] = date_m.group(1).strip() if date_m else 'N/A'
+
+                all_lots.append(lot)
+                found_on_page += 1
+
+            st.write(f"Сторінка {page}: знайдено кандидатів — **{found_on_page}**")
+
+            if found_on_page < 5:
+                st.info(f"Мало кандидатів на сторінці {page}. Можливо, кінець списку або сайт змінив структуру.")
                 break
 
-            time.sleep(delay_seconds)  # пауза між запитами
+            time.sleep(delay_sec)
             page += 1
 
-        # Результат
+        # Підсумок
         if all_lots:
             df = pd.DataFrame(all_lots)
-            st.success(f"Зібрано {len(all_lots)} записів з {page-1} сторінок")
+            st.success(f"Зібрано **{len(all_lots)}** потенційних лотів з {page-1} сторінок")
 
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, use_container_width=True, column_config={
+                "Повний текст": st.column_config.TextColumn(width="medium"),
+                "Посилання": st.column_config.LinkColumn()
+            })
 
             csv = df.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
-                label="Скачати як CSV",
-                data=csv,
-                file_name=f"uub_lots_{len(all_lots)}_записів.csv",
-                mime="text/csv"
+                "Скачати CSV (всі кандидати)",
+                csv,
+                f"uub_candidates_{len(all_lots)}.csv",
+                "text/csv"
             )
         else:
-            st.warning("Не вдалося знайти жодного лоту. Можливі причини:")
-            st.markdown("""
-            - Сайт досі видає 503 або недоступний
-            - Сторінки завантажуються через JavaScript (потрібен Selenium)
-            - Потрібні точніші селектори (пришли outerHTML однієї картки лоту з F12)
-            """)
-
-st.markdown("---")
-st.caption("Парсер створено для особистого використання. Не використовуй для масового скрейпінгу без дозволу сайту.")
+            st.warning("Не знайдено жодного кандидата. Сайт може бути недоступним або контент завантажується через JS.")
